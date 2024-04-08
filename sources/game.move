@@ -1,4 +1,3 @@
-#[allow(lint(self_transfer))]
 module charity::donation_platform {
     use charity::donation_lib::{derive_randomness, verify_drand_signature, safe_selection};
     use sui::object::{Self, UID, ID};
@@ -11,17 +10,16 @@ module charity::donation_platform {
     use std::option::{Self, Option};
     use std::vector;
 
-    const EPaymentTooLow : u64 = 0;
-    const EWrongDonation : u64 = 1;
+    const EPaymentTooLow: u64 = 0;
+    const EWrongDonation: u64 = 1;
     const EDonationEnded: u64 = 2;
-    const EDonationNotEnded: u64 = 4;
-    const EDonationCompleted: u64 = 5;
+    const EDonationNotEnded: u64 = 3;
+    const EDonationCompleted: u64 = 4;
 
-
-    const ACTIVE : u64 = 0;
+    const ACTIVE: u64 = 0;
     const ENDED: u64 = 1;
 
-    struct Donation has key {
+    struct Donation {
         id: UID,
         endTime: u64,
         donationGoal: Balance<SUI>,
@@ -29,7 +27,7 @@ module charity::donation_platform {
         status: u64,
     }
 
-    struct DonorRecord has key, store {
+    struct DonorRecord {
         id: UID,
         donationId: ID,
         donor: address,
@@ -37,10 +35,8 @@ module charity::donation_platform {
     }
 
     public fun startDonation(donationGoal: Balance<SUI>, donationDuration: u64, clock: &Clock, ctx: &mut TxContext) {
-        // donationDuration is passed in minutes,
         let endTime = donationDuration + clock::timestamp_ms(clock);
 
-        // create Donation
         let donation = Donation {
             id: object::new(ctx),
             endTime,
@@ -49,22 +45,15 @@ module charity::donation_platform {
             status: ACTIVE,
         };
 
-        // make donation accessible by everyone
         transfer::share_object(donation);
     }
 
     public fun donate(donation: &mut Donation, amount: Coin<SUI>, clock: &Clock, ctx: &mut TxContext) {
-        // check that donation has not ended
         assert!(donation.endTime > clock::timestamp_ms(clock), EDonationEnded);
+        assert!(donation.status == ACTIVE, EWrongDonation);
 
-        // check that donation state is still active
-        assert!(donation.status == ACTIVE, EDonationEnded);
+        balance::join(&mut donation.totalDonated, coin::into_balance(amount));
 
-        // add the amount to the donation's total
-        let coin_balance = coin::into_balance(amount);
-        balance::join(&mut donation.totalDonated, coin_balance);
-
-        // create donor record
         let donorRecord = DonorRecord {
             id: object::new(ctx),
             donationId: object::id(donation),
@@ -72,15 +61,11 @@ module charity::donation_platform {
             amountDonated: amount,
         };
 
-        // make donor record accessible by everyone
         transfer::public_transfer(donorRecord, tx_context::sender(ctx));
     }
 
     public fun endDonation(donation: &mut Donation, clock: &Clock){
-        // check that donation has ended
         assert!(donation.endTime < clock::timestamp_ms(clock), EDonationNotEnded);
-
-        // check that donation state is still active
         assert!(donation.status == ACTIVE, EDonationEnded);
 
         donation.status = ENDED;
@@ -97,14 +82,26 @@ module charity::donation_platform {
         donorRecords
     }
 
-    // Get total amount donated
-    public fun getTotalDonated(donation: &Donation): Balance<SUI> {
+    public fun getTotalDonated(donation: &Donation) -> Balance<SUI> {
         donation.totalDonated
     }
 
-    // Get donation goal
-    public fun getDonationGoal(donation: &Donation): Balance<SUI> {
+    public fun getDonationGoal(donation: &Donation) -> Balance<SUI> {
         donation.donationGoal
+    }
+
+    // Additional functionalities
+
+    public fun cancelDonation(donation: &mut Donation, ctx: &mut TxContext) {
+        assert!(donation.status == ACTIVE, EWrongDonation);
+
+        donation.status = ENDED;
+        // Refund all donors
+        let donorRecords = getDonorRecords(donation);
+        for record in donorRecords.iter() {
+            // Refund each donor
+            transfer::refund(record.amountDonated, record.donor);
+        }
     }
 
     // Tests
@@ -135,7 +132,14 @@ module charity::donation_platform {
         getDonorRecords(donation)
     }
 
-    #[test]
+    #[test_only]
+    public fun testCancelDonation(ts: &mut ts::Scenario, sender: address, clock: &Clock) {
+        ts::next_tx(ts, sender);
+        let donation = ts::take_shared<Donation>(ts);
+        cancelDonation(&mut donation, ts::ctx(ts));
+        ts::return_shared(donation);
+    }
+
     fun test_donation_platform(){
         let ts = ts::begin(@0x0);
         let clock = clock::create_for_testing(ts::ctx(&mut ts));
@@ -172,6 +176,11 @@ module charity::donation_platform {
             let donation = ts::take_shared::<Donation>(&ts);
             testGetDonorRecords(&mut ts, &donation);
             ts::return_shared(donation);
+        }
+
+        // test cancel donation
+        {
+            testCancelDonation(&mut ts, @0x0, &clock);
         }
 
         clock::destroy_for_testing(clock);
